@@ -1,0 +1,6 @@
+{
+  "name": "ADD Gardening & Maintenance Services",
+  "description": "Mobile garden and home maintenance team covering Lowestoft, Beccles, Bungay, Great Yarmouth and surrounding towns. Lawns, hedges, ponds, fences, pressure washing, flat-pack assembly. DBS-checked, fully insured, £21.50/hr.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
