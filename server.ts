@@ -33,6 +33,36 @@ async function startServer() {
   // Mount all backend API routes (/api/chat, /api/quote, /api/book, /api/health, /api/admin/*)
   app.use(apiApp);
 
+  // Social crawler handler for Facebook Messenger, Facebook, WhatsApp, Twitter/X, LinkedIn, Discord
+  // Facebook Messenger strictly requires absolute URLs for og:image
+  const socialCrawlerRegex = /facebookexternalhit|facebot|facebookcatalog|twitterbot|whatsapp|linkedinbot|telegrambot|discordbot|slackbot/i;
+
+  app.use((req, res, next) => {
+    const userAgent = req.get("user-agent") || "";
+    const isCrawler = socialCrawlerRegex.test(userAgent);
+
+    if (isCrawler && req.method === "GET" && !req.path.startsWith("/api") && !req.path.includes(".")) {
+      const host = req.get("x-forwarded-host") || req.get("host") || "";
+      const proto = req.get("x-forwarded-proto") || (req.secure ? "https" : "http");
+      const baseUrl = host ? `${proto}://${host}` : "";
+
+      const distIndexPath = path.join(process.cwd(), "dist", "index.html");
+      const rootIndexPath = path.join(process.cwd(), "index.html");
+      const indexPath = fs.existsSync(distIndexPath) ? distIndexPath : rootIndexPath;
+
+      if (fs.existsSync(indexPath) && baseUrl) {
+        let html = fs.readFileSync(indexPath, "utf-8");
+        const absoluteImageUrl = `${baseUrl}/og-image.png`;
+        html = html
+          .replace(/content="\/og-image\.png"/g, `content="${absoluteImageUrl}"`)
+          .replace(/<head>/i, `<head>\n    <meta property="og:url" content="${baseUrl}${req.path}" />`);
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        return res.send(html);
+      }
+    }
+    next();
+  });
+
   // Determine whether we are in production or development mode
   // In the bundled dist/server.cjs, IS_PRODUCTION is compiled to true by esbuild
   const isBundled = typeof IS_PRODUCTION !== "undefined" && IS_PRODUCTION === true;

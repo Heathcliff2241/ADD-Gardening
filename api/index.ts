@@ -642,7 +642,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-app.all(["/api", "/"], (_req: Request, res: Response) => {
+app.all(["/api", "/api/"], (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     service: "ADD Gardening & Maintenance Services API",
