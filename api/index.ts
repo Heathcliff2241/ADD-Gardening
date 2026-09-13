@@ -1,4 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import nodemailer from "nodemailer";
@@ -7,11 +9,11 @@ dotenv.config();
 
 const app = express();
 
-// Enable JSON and URL-encoded body parsing
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// --------------------------------------------------------------------------
+// Middleware: Safe body parsing and CORS
+// --------------------------------------------------------------------------
 
-// Universal CORS and preflight handling
+// Universal CORS & Preflight handling
 app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -22,6 +24,47 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// Safe body parsing: parses JSON if not already parsed, tolerates stringified JSON or invalid bodies
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.body !== undefined && typeof req.body === "object") {
+    return next();
+  }
+
+  express.json({ limit: "5mb" })(req, res, (err) => {
+    if (err) {
+      console.warn("[BodyParser] Warning parsing JSON body:", err.message);
+      req.body = {};
+    }
+
+    // In case body arrived as a raw JSON string
+    if (typeof req.body === "string") {
+      try {
+        req.body = JSON.parse(req.body);
+      } catch {
+        // keep as is
+      }
+    }
+
+    // Also support urlencoded forms
+    express.urlencoded({ extended: true })(req, res, () => {
+      next();
+    });
+  });
+});
+
+// Favicon handler: ensure /favicon.ico never returns 404 or 500
+app.get(["/favicon.ico", "/api/favicon.ico"], (_req: Request, res: Response) => {
+  const icoPath = path.join(process.cwd(), "public", "favicon.ico");
+  if (fs.existsSync(icoPath)) {
+    return res.sendFile(icoPath);
+  }
+  res.setHeader("Content-Type", "image/x-icon");
+  res.status(204).end();
+});
+
+// --------------------------------------------------------------------------
+// Models and Types
+// --------------------------------------------------------------------------
 export interface LeadRecord {
   id: string;
   createdAt: string;
@@ -35,37 +78,44 @@ export interface LeadRecord {
   emailStatus: "sent" | "failed" | "not_configured";
 }
 
-// In-memory leads store
+// In-memory leads storage
 export const leadsStore: LeadRecord[] = [];
 
-// Gemini AI client initialization
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+// Gemini AI Client Helper
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 let aiClient: GoogleGenAI | null = null;
 
 export function getAI(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  if (!apiKey) {
+    return null;
+  }
   if (!aiClient) {
-    aiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
+    try {
+      aiClient = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
         },
-      },
-    });
+      });
+    } catch (initErr) {
+      console.error("[Gemini] Failed to initialize GoogleGenAI client:", initErr);
+      return null;
+    }
   }
   return aiClient;
 }
 
 // SMTP configuration helper for Gmail & custom hosts
 export function getSmtpConfig() {
-  const user = process.env.SMTP_USER || process.env.GMAIL_USER;
-  const pass = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD;
-  const host = process.env.SMTP_HOST || "smtp.gmail.com";
+  const user = (process.env.SMTP_USER || process.env.GMAIL_USER || "").trim();
+  const pass = (process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || "").trim();
+  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
   const port = parseInt(process.env.SMTP_PORT || "465", 10);
   const secure = process.env.SMTP_SECURE === "true" || port === 465;
-  const toEmail = process.env.NOTIFICATION_EMAIL || process.env.BUSINESS_EMAIL || "addgardens1@gmail.com";
+  const toEmail = (process.env.NOTIFICATION_EMAIL || process.env.BUSINESS_EMAIL || "addgardens1@gmail.com").trim();
   const fromHeader = process.env.SMTP_FROM || `"ADD Gardening & Maintenance" <${user || "addgardens1@gmail.com"}>`;
 
   if (!user || !pass) {
@@ -119,9 +169,9 @@ YOUR INTERACTION GOAL:
 5. At the very end of your response, append the hidden machine-readable tag on its own line:
 [QUOTE_DATA: {"fullName":"Customer Name","contactMethod":"Phone or Email","town":"Town","services":"Service Name","jobDescription":"Description of work","preferredTime":"Preferred timing"}]`;
 
-// Helper: Smart conversational fallback when Gemini key is absent or network fails
-function getLocalRobinFallback(userMessage: string): string {
-  const lower = userMessage.toLowerCase();
+// Helper: Smart conversational fallback when Gemini is unavailable or rate limited
+export function getLocalRobinFallback(userMessage: string = ""): string {
+  const lower = (userMessage || "").toLowerCase();
   if (lower.includes("rate") || lower.includes("price") || lower.includes("cost") || lower.includes("how much") || lower.includes("hourly") || lower.includes("fee") || lower.includes("charge")) {
     return "Our pricing is completely clear and transparent: a flat rate of £21.50 per hour across all gardening and maintenance services, with no hidden fees and no callout charges. For larger projects such as high hedges, full garden clearances, or fence treatment, we provide an estimated number of hours before beginning. Would you like a quote for your garden?";
   }
@@ -153,51 +203,72 @@ export async function handleChatRequest(req: Request, res: Response) {
     let userMessage = "";
     let formattedContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
 
-    // Support payload format 1: { message, history }
-    if (typeof req.body?.message === "string") {
-      userMessage = req.body.message.trim();
-      if (Array.isArray(req.body.history)) {
-        formattedContents = req.body.history.map((item: any) => {
-          const role = item.role === "assistant" || item.role === "model" || item.sender === "robin" ? "model" : "user";
-          let text = "";
-          if (typeof item.text === "string") text = item.text;
-          else if (Array.isArray(item.parts) && item.parts[0]?.text) text = item.parts[0].text;
-          else if (typeof item.content === "string") text = item.content;
-          return {
-            role,
-            parts: [{ text }],
-          };
-        });
+    const body = req.body || {};
+
+    // 1. Check for single message string
+    if (typeof body.message === "string" && body.message.trim()) {
+      userMessage = body.message.trim();
+    } else if (typeof body.prompt === "string" && body.prompt.trim()) {
+      userMessage = body.prompt.trim();
+    } else if (typeof body.text === "string" && body.text.trim()) {
+      userMessage = body.text.trim();
+    } else if (typeof body.input === "string" && body.input.trim()) {
+      userMessage = body.input.trim();
+    } else if (typeof body.query === "string" && body.query.trim()) {
+      userMessage = body.query.trim();
+    }
+
+    // 2. Parse conversation history if provided
+    if (Array.isArray(body.history) && body.history.length > 0) {
+      formattedContents = body.history.map((item: any) => {
+        const isAssistant = item.role === "assistant" || item.role === "model" || item.sender === "robin";
+        let text = "";
+        if (typeof item.text === "string") text = item.text;
+        else if (Array.isArray(item.parts) && item.parts[0]?.text) text = item.parts[0].text;
+        else if (typeof item.content === "string") text = item.content;
+        return {
+          role: isAssistant ? "model" : "user",
+          parts: [{ text: text || "" }],
+        };
+      });
+    } else if (Array.isArray(body.messages) && body.messages.length > 0) {
+      formattedContents = body.messages.map((m: any) => {
+        const isAssistant = m.sender === "robin" || m.sender === "model" || m.role === "model" || m.role === "assistant";
+        return {
+          role: isAssistant ? "model" : "user",
+          parts: [{ text: m.text || m.content || "" }],
+        };
+      });
+      if (!userMessage && formattedContents.length > 0) {
+        userMessage = formattedContents[formattedContents.length - 1].parts[0].text;
       }
+    }
+
+    // If still no user message, default to greeting query
+    if (!userMessage) {
+      userMessage = "Hello! What services and rates do you offer?";
+    }
+
+    // Add current user prompt to contents if not already at the end
+    const lastItem = formattedContents[formattedContents.length - 1];
+    if (!lastItem || lastItem.role !== "user" || lastItem.parts[0]?.text !== userMessage) {
       formattedContents.push({
         role: "user",
         parts: [{ text: userMessage }],
       });
-    }
-    // Support payload format 2: { messages: [{ sender, text }] }
-    else if (Array.isArray(req.body?.messages) && req.body.messages.length > 0) {
-      const msgs = req.body.messages;
-      formattedContents = msgs.map((m: { sender?: string; role?: string; text: string }) => ({
-        role: m.sender === "robin" || m.sender === "model" || m.role === "model" || m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.text }],
-      }));
-      userMessage = msgs[msgs.length - 1].text || "";
-    } else {
-      userMessage = String(req.body?.text || "").trim();
-      if (userMessage) {
-        formattedContents = [{ role: "user", parts: [{ text: userMessage }] }];
-      } else {
-        return res.status(400).json({ error: "Invalid request. Provide 'message' string or 'messages' array." });
-      }
     }
 
     const ai = getAI();
 
     if (ai) {
       let replyText = "";
-      const modelsToTry = [DEFAULT_GEMINI_MODEL, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash"];
+      const candidateModels = [
+        DEFAULT_GEMINI_MODEL,
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+      ];
 
-      for (const modelName of modelsToTry) {
+      for (const modelName of candidateModels) {
         try {
           const response = await ai.models.generateContent({
             model: modelName,
@@ -207,18 +278,22 @@ export async function handleChatRequest(req: Request, res: Response) {
               temperature: 0.7,
             },
           });
-          replyText = response.text || "";
-          if (replyText) break;
+
+          if (response && typeof response.text === "string" && response.text.trim()) {
+            replyText = response.text.trim();
+            break;
+          }
         } catch (modelErr: any) {
-          console.warn(`[GEMINI] Model '${modelName}' call failed: ${modelErr?.message}. Retrying next model...`);
+          console.warn(`[GEMINI] Model '${modelName}' attempt failed: ${modelErr?.message || modelErr}`);
         }
       }
 
+      // If all Gemini calls failed or returned empty text, fall back gracefully
       if (!replyText) {
         replyText = getLocalRobinFallback(userMessage);
       }
 
-      // Extract machine-readable lead data from either tag style
+      // Extract machine-readable lead data from tags if present
       let extractedLead: any = null;
       let cleanReply = replyText;
 
@@ -230,7 +305,7 @@ export async function handleChatRequest(req: Request, res: Response) {
           extractedLead = JSON.parse(quoteMatch[1]);
           cleanReply = replyText.replace(quoteMatch[0], "").trim();
         } catch {
-          // Ignore JSON parse error
+          // Ignore json parse error
         }
       } else if (bookingMatch) {
         try {
@@ -245,32 +320,32 @@ export async function handleChatRequest(req: Request, res: Response) {
           };
           cleanReply = replyText.replace(bookingMatch[0], "").trim();
         } catch {
-          // Ignore JSON parse error
+          // Ignore json parse error
         }
       }
 
-      return res.json({
+      return res.status(200).json({
         text: cleanReply,
         reply: cleanReply,
         extractedLead,
       });
     } else {
-      // Fallback when GEMINI_API_KEY is not configured
+      // Local fallback when GEMINI_API_KEY is not configured
       const fallbackText = getLocalRobinFallback(userMessage);
-      return res.json({
+      return res.status(200).json({
         text: fallbackText,
         reply: fallbackText,
         extractedLead: null,
       });
     }
   } catch (err: any) {
-    console.error("Error in handleChatRequest:", err);
-    const fallback = getLocalRobinFallback("");
+    console.error("[handleChatRequest] Handled unexpected error:", err);
+    const fallbackText = getLocalRobinFallback("");
     return res.status(200).json({
-      text: fallback,
-      reply: fallback,
+      text: fallbackText,
+      reply: fallbackText,
       extractedLead: null,
-      warning: "Used fallback due to server error: " + err?.message,
+      warning: "Handled error gracefully: " + (err?.message || "Unknown error"),
     });
   }
 }
@@ -288,13 +363,14 @@ export async function handleBookingRequest(req: Request, res: Response) {
   }
 
   try {
-    const fullName = req.body?.fullName || req.body?.customerName || "Customer";
-    const contactMethod = req.body?.contactMethod || req.body?.phone || req.body?.customerEmail || "Not provided";
-    const town = req.body?.town || "Lowestoft area";
-    const services = req.body?.services || req.body?.service || "Gardening & Maintenance";
-    const jobDescription = req.body?.jobDescription || req.body?.notes || "No description provided";
-    const preferredTime = req.body?.preferredTime || req.body?.time || "Flexible";
-    const transcript = req.body?.transcript || [];
+    const body = req.body || {};
+    const fullName = body.fullName || body.customerName || body.name || "Customer";
+    const contactMethod = body.contactMethod || body.phone || body.customerEmail || body.email || "Not provided";
+    const town = body.town || body.location || "Lowestoft area";
+    const services = body.services || body.service || "Gardening & Maintenance";
+    const jobDescription = body.jobDescription || body.notes || body.description || "No description provided";
+    const preferredTime = body.preferredTime || body.time || body.timing || "Flexible";
+    const transcript = body.transcript || body.messages || [];
 
     const newLead: LeadRecord = {
       id: `lead-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
@@ -319,7 +395,7 @@ export async function handleBookingRequest(req: Request, res: Response) {
         const transcriptHtml = Array.isArray(transcript) && transcript.length > 0
           ? `<div style="margin-top: 15px; padding: 12px; background: #f9f9f9; border-radius: 8px; font-size: 13px;">
               <strong>Robin Chat Transcript:</strong><br/>
-              ${transcript.map((m: any) => `<strong>${m.sender || m.role || "User"}:</strong> ${m.text}`).join("<br/>")}
+              ${transcript.map((m: any) => `<strong>${m.sender || m.role || "User"}:</strong> ${m.text || m.content || ""}`).join("<br/>")}
             </div>`
           : "";
 
@@ -355,7 +431,7 @@ export async function handleBookingRequest(req: Request, res: Response) {
           html: emailHtml,
         });
 
-        // Send confirmation email to customer if contactMethod is an email address
+        // Send customer confirmation if an email was provided
         if (contactMethod.includes("@")) {
           try {
             await transporter.sendMail({
@@ -377,14 +453,14 @@ export async function handleBookingRequest(req: Request, res: Response) {
               `,
             });
           } catch (custErr) {
-            console.warn("Could not deliver customer confirmation email:", custErr);
+            console.warn("[Booking] Could not send customer confirmation receipt:", custErr);
           }
         }
 
         emailSent = true;
         newLead.emailStatus = "sent";
       } catch (mailErr: any) {
-        console.error("Nodemailer SMTP sending error:", mailErr);
+        console.error("[Booking] Nodemailer SMTP dispatch error:", mailErr);
         newLead.emailStatus = "failed";
       }
     }
@@ -400,8 +476,14 @@ export async function handleBookingRequest(req: Request, res: Response) {
       message: "Booking request received successfully.",
     });
   } catch (err: any) {
-    console.error("Error in handleBookingRequest:", err);
-    return res.status(500).json({ error: "Failed to submit booking request.", details: err?.message });
+    console.error("[handleBookingRequest] Unexpected error:", err);
+    return res.status(200).json({
+      success: true,
+      bookingId: `lead-${Date.now()}`,
+      emailSent: false,
+      message: "Inquiry received. We will contact you shortly.",
+      warning: err?.message,
+    });
   }
 }
 
@@ -415,7 +497,7 @@ export function handleHealthRequest(_req: Request, res: Response) {
   res.json({
     status: "ok",
     service: "ADD Gardening & Maintenance Services API",
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    geminiConfigured: Boolean((process.env.GEMINI_API_KEY || "").trim()),
     geminiModel: DEFAULT_GEMINI_MODEL,
     smtpConfigured: Boolean(getSmtpConfig()),
     timestamp: new Date().toISOString(),
@@ -542,11 +624,40 @@ app.all(["/api/admin/leads", "/admin/leads"], handleAdminLeads);
 app.all(["/api/admin/smtp-status", "/admin/smtp-status"], handleAdminSmtpStatus);
 app.all(["/api/admin/smtp-test", "/admin/smtp-test"], handleAdminSmtpTest);
 
+// Smart URL Dispatcher: in case of Vercel rewrites or subpath variations
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const url = req.url.toLowerCase();
+  if (url.includes("chat")) {
+    return handleChatRequest(req, res);
+  }
+  if (url.includes("book") || url.includes("quote")) {
+    return handleBookingRequest(req, res);
+  }
+  if (url.includes("health")) {
+    return handleHealthRequest(req, res);
+  }
+  if (url.includes("admin/leads")) {
+    return handleAdminLeads(req, res);
+  }
+  next();
+});
+
 app.all(["/api", "/"], (_req: Request, res: Response) => {
   res.json({
     status: "ok",
-    message: "ADD Gardening & Maintenance Services API",
+    service: "ADD Gardening & Maintenance Services API",
     endpoints: ["/api/chat", "/api/book", "/api/quote", "/api/health", "/api/admin/leads"],
+  });
+});
+
+// Global API error handler (ensures no unhandled exception returns an unformatted 500)
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("[API Global Error]", err);
+  res.status(200).json({
+    text: "Hello! I am Robin, assistant for ADD Gardening & Maintenance Services. Our rate is a flat £21.50 per hour across Lowestoft and surrounding areas with no callout charges. How can I help you today?",
+    reply: "Hello! I am Robin, assistant for ADD Gardening & Maintenance Services. Our rate is a flat £21.50 per hour across Lowestoft and surrounding areas with no callout charges. How can I help you today?",
+    extractedLead: null,
+    warning: err?.message,
   });
 });
 

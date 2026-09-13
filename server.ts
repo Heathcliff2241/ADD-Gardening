@@ -27,6 +27,9 @@ async function startServer() {
     next();
   });
 
+  // Serve static files from public directory (e.g. favicon.ico, favicon.svg)
+  app.use(express.static(path.join(process.cwd(), "public")));
+
   // Mount all backend API routes (/api/chat, /api/quote, /api/book, /api/health, /api/admin/*)
   app.use(apiApp);
 

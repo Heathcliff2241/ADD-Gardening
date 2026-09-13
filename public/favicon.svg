@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#1F4B34"/>
+  <circle cx="32" cy="32" r="24" fill="#173827" opacity="0.6"/>
+  <!-- Elegant leaf emblem -->
+  <path d="M32 12 C44 14, 52 26, 50 40 C48 50, 38 52, 32 52 C26 52, 16 50, 14 40 C12 26, 20 14, 32 12 Z" fill="#C9A227"/>
+  <path d="M32 16 C32 30, 24 42, 18 44 C22 34, 26 24, 32 16 Z" fill="#E6C86E"/>
+  <path d="M32 20 L32 48" stroke="#1F4B34" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M32 28 C36 26, 42 28, 44 32" stroke="#1F4B34" stroke-width="2" stroke-linecap="round" fill="none"/>
+  <path d="M32 36 C36 34, 40 36, 42 40" stroke="#1F4B34" stroke-width="2" stroke-linecap="round" fill="none"/>
+  <path d="M32 32 C28 30, 24 32, 22 36" stroke="#1F4B34" stroke-width="2" stroke-linecap="round" fill="none"/>
+</svg>
