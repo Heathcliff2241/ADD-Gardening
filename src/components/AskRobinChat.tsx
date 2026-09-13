@@ -152,62 +152,100 @@ export const AskRobinChat: React.FC<AskRobinChatProps> = ({
         parts: [{ text: m.text }],
       }));
 
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: text,
-          history,
-        }),
-      });
+      let responseText = "";
+      let quoteData: QuoteInquiry | null = null;
 
-      if (!res.ok) {
-        throw new Error(`Server returned status ${res.status}`);
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: text,
+            history,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          responseText = data.text || data.reply || "";
+
+          // Check for machine readable lead extraction
+          const quoteMatch = responseText.match(/\[QUOTE_DATA:\s*({[\s\S]*?})\]/) || responseText.match(/<<<QUOTE_DATA:\s*({[\s\S]*?})>>>/);
+          const bookingMatch = responseText.match(/\[BOOKING_DATA:\s*({[\s\S]*?})\]/);
+
+          if (quoteMatch) {
+            try {
+              const parsed = JSON.parse(quoteMatch[1]);
+              quoteData = {
+                id: `quote-${Date.now()}`,
+                fullName: parsed.fullName || parsed.customerName || "Customer",
+                contactMethod: parsed.contactMethod || parsed.phone || parsed.customerEmail || "",
+                town: parsed.town || "Lowestoft area",
+                services: parsed.services || parsed.service || "Gardening & Maintenance",
+                jobDescription: parsed.jobDescription || parsed.notes || "",
+                preferredTime: parsed.preferredTime || parsed.time || "Flexible",
+                dateCreated: new Date().toISOString(),
+              };
+              responseText = responseText.replace(quoteMatch[0], "").trim();
+            } catch (e) {
+              console.error("Failed to parse quote JSON:", e);
+            }
+          } else if (bookingMatch) {
+            try {
+              const b = JSON.parse(bookingMatch[1]);
+              quoteData = {
+                id: `quote-${Date.now()}`,
+                fullName: b.customerName || b.fullName || "Customer",
+                contactMethod: b.customerEmail || b.phone || "",
+                town: b.town || "Lowestoft area",
+                services: b.service || "Gardening & Maintenance",
+                jobDescription: b.notes || "",
+                preferredTime: b.time || "Flexible",
+                dateCreated: new Date().toISOString(),
+              };
+              responseText = responseText.replace(bookingMatch[0], "").trim();
+            } catch (e) {
+              console.error("Failed to parse booking JSON:", e);
+            }
+          }
+        } else {
+          console.warn(`[Robin Assistant] /api/chat returned status ${res.status}. Using smart local fallback.`);
+        }
+      } catch (fetchErr) {
+        console.warn("[Robin Assistant] Network fetch to /api/chat failed. Using smart local fallback:", fetchErr);
       }
 
-      const data = await res.json();
-      let responseText = data.text || data.reply || "";
+      // If backend was unreachable or returned an empty reply, use built-in intelligent assistant
+      if (!responseText) {
+        const lower = text.toLowerCase();
+        const phoneMatch = text.match(/(?:(?:\+44\s?|0)(?:7\d{3}|\d{4})\s?\d{3}\s?\d{3}|[0-9]{10,11})/);
+        const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        const contactFound = phoneMatch ? phoneMatch[0] : (emailMatch ? emailMatch[0] : "");
 
-      // Check for machine readable lead extraction
-      let quoteData: QuoteInquiry | null = null;
-      const quoteMatch = responseText.match(/\[QUOTE_DATA:\s*({[\s\S]*?})\]/) || responseText.match(/<<<QUOTE_DATA:\s*({[\s\S]*?})>>>/);
-      const bookingMatch = responseText.match(/\[BOOKING_DATA:\s*({[\s\S]*?})\]/);
-
-      if (quoteMatch) {
-        try {
-          const parsed = JSON.parse(quoteMatch[1]);
+        if (contactFound) {
           quoteData = {
             id: `quote-${Date.now()}`,
-            fullName: parsed.fullName || parsed.customerName || "Customer",
-            contactMethod: parsed.contactMethod || parsed.phone || parsed.customerEmail || "",
-            town: parsed.town || "Lowestoft area",
-            services: parsed.services || parsed.service || "Gardening & Maintenance",
-            jobDescription: parsed.jobDescription || parsed.notes || "",
-            preferredTime: parsed.preferredTime || parsed.time || "Flexible",
+            fullName: "Customer",
+            contactMethod: contactFound,
+            town: "Lowestoft area",
+            services: "Gardening & Maintenance",
+            jobDescription: text,
+            preferredTime: "Flexible",
             dateCreated: new Date().toISOString(),
           };
-          responseText = responseText.replace(quoteMatch[0], "").trim();
-        } catch (e) {
-          console.error("Failed to parse quote JSON:", e);
-        }
-      } else if (bookingMatch) {
-        try {
-          const b = JSON.parse(bookingMatch[1]);
-          quoteData = {
-            id: `quote-${Date.now()}`,
-            fullName: b.customerName || b.fullName || "Customer",
-            contactMethod: b.customerEmail || b.phone || "",
-            town: b.town || "Lowestoft area",
-            services: b.service || "Gardening & Maintenance",
-            jobDescription: b.notes || "",
-            preferredTime: b.time || "Flexible",
-            dateCreated: new Date().toISOString(),
-          };
-          responseText = responseText.replace(bookingMatch[0], "").trim();
-        } catch (e) {
-          console.error("Failed to parse booking JSON:", e);
+          responseText = `Thank you! I have noted your contact details (**${contactFound}**). The team has received your inquiry and will call or message you shortly to confirm your quote and schedule.\n\nOur standard rate is **£21.50 per hour** across all jobs. For immediate help, you can also reach us directly on 07538 482844.`;
+        } else if (lower.includes("rate") || lower.includes("price") || lower.includes("cost") || lower.includes("how much") || lower.includes("hourly") || lower.includes("fee") || lower.includes("charge")) {
+          responseText = "Our pricing is completely clear: a flat **£21.50 per hour** across all gardening and maintenance services, with **no hidden fees** and **no callout charges**.\n\nFor larger jobs like extensive hedge cutting, full garden clearances, or fence treatment, we provide an estimated number of hours before starting. Would you like to request a quote for your garden?";
+        } else if (lower.includes("area") || lower.includes("cover") || lower.includes("location") || lower.includes("town") || lower.includes("where") || lower.includes("beccles") || lower.includes("yarmouth") || lower.includes("bungay")) {
+          responseText = "We are mobile and based in **Oulton Broad, Lowestoft**.\n\nWe cover **Lowestoft, Oulton Broad, Pakefield, Hopton, Corton, Bungay, Poringland, Loddon, Beccles, Great Yarmouth, Oulton, Hempnall, Long Stratton, Harleston, and Gorleston**.\n\nWhich town or village are you in?";
+        } else if (lower.includes("service") || lower.includes("what do you do") || lower.includes("hedge") || lower.includes("lawn") || lower.includes("grass") || lower.includes("pond") || lower.includes("fence") || lower.includes("pressure") || lower.includes("flat-pack")) {
+          responseText = "We provide comprehensive garden and property care at our flat **£21.50/hr** rate:\n\n- **Lawn Care**: Mowing, edging, strimming, and scarifying\n- **Hedges & Shrubs**: Trimming, shaping, and height reduction\n- **Garden Tidying**: Overgrowth clearance and green waste disposal\n- **Planting**: Bed preparation, weeding, and border care\n- **Fences**: Painting, treatment, and basic repairs\n- **Pressure Washing**: Patios, driveways, and decking\n- **Ponds**: Clearing, silt removal, and plant thinning\n- **Flat-Pack**: Furniture, shed, and fixture assembly\n\nWhat kind of job can we help you with?";
+        } else if (lower.includes("quote") || lower.includes("book") || lower.includes("estimate") || lower.includes("hire") || lower.includes("contact")) {
+          responseText = "I would be glad to help arrange a quote for you at our standard **£21.50/hr** rate.\n\nTo help our team prepare, could you please share:\n1. Your name\n2. Your town or village\n3. The best phone number or email address to reach you on?";
+        } else {
+          responseText = "Hello! I am Robin, your virtual assistant for **ADD Gardening & Maintenance Services**.\n\nWe provide reliable lawn care, hedge trimming, garden clearance, fencing, pressure washing, and flat-pack assembly across Lowestoft and surrounding towns at our transparent flat rate of **£21.50 per hour**.\n\nHow can I help you today? Would you like pricing details, coverage information, or a quick quote?";
         }
       }
 
